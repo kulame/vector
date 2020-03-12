@@ -9,6 +9,7 @@ use bytes::Bytes;
 use futures01::{
     future, stream::iter_ok, try_ready, Async, AsyncSink, Future, Poll, Sink, StartSend,
 };
+use metrics::counter;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use std::net::SocketAddr;
@@ -143,6 +144,7 @@ impl TcpSink {
                 TcpSinkState::Connecting(ref mut connect_future) => match connect_future.poll() {
                     Ok(Async::Ready(stream)) => {
                         debug!(message = "connected");
+                        counter!("sinks.tcp_connections_established", 1);
                         self.backoff = Self::fresh_backoff();
                         TcpSinkState::Connected(FramedWrite::new(stream, BytesCodec::new()))
                     }
@@ -151,6 +153,7 @@ impl TcpSink {
                     }
                     Err(error) => {
                         error!(message = "unable to connect.", %error);
+                        counter!("sinks.tcp_connection_failures", 1);
                         TcpSinkState::Backoff(self.next_delay())
                     }
                 },
@@ -176,9 +179,12 @@ impl Sink for TcpSink {
                     message = "sending event.",
                     bytes = &field::display(line.len())
                 );
+                counter!("sinks.tcp_events_sent", 1);
+                counter!("sinks.tcp_bytes_sent", line.len() as u64);
                 match connection.start_send(line) {
                     Err(error) => {
                         error!(message = "connection disconnected.", %error);
+                        counter!("sinks.tcp_connection_disconnects", 1);
                         self.state = TcpSinkState::Disconnected;
                         Ok(AsyncSink::Ready)
                     }
@@ -205,6 +211,7 @@ impl Sink for TcpSink {
         match connection.poll_complete() {
             Err(error) => {
                 error!(message = "unable to flush connection.", %error);
+                counter!("sinks.tcp_connection_flush_errors", 1);
                 self.state = TcpSinkState::Disconnected;
                 Ok(Async::Ready(()))
             }
